@@ -14,67 +14,116 @@ url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
 supabase = create_client(url, key)
 
-# --- FUNCIONES DE GESTIÓN ---
-def obtener_empleados():
-    res = supabase.table("empleados").select("*").execute()
+# --- FUNCIONES DE GESTIÓN (BASE DE DATOS) ---
+def obtener_datos(tabla):
+    res = supabase.table(tabla).select("*").execute()
     return pd.DataFrame(res.data)
 
-def guardar_empleado(id_e, nombre):
-    supabase.table("empleados").upsert({"id": id_e, "nombre": nombre}).execute()
+def guardar_datos(tabla, datos):
+    try:
+        supabase.table(tabla).upsert(datos).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return False
 
-def eliminar_empleado(id_e):
-    supabase.table("empleados").delete().eq("id", id_e).execute()
+def eliminar_datos(tabla, columna_id, valor_id):
+    supabase.table(tabla).delete().eq(columna_id, valor_id).execute()
 
-# --- INTERFAZ ---
+# --- INTERFAZ PRINCIPAL ---
 with st.sidebar:
     st.title("Abarrotes Las 3B")
     menu = st.radio("MENÚ", ["📱 REGISTRO", "🔐 ADMIN"])
 
+# --- MÓDULO DE REGISTRO ---
 if menu == "📱 REGISTRO":
     st.header("Control de Asistencia")
-    # Nota sobre biométricos: 
-    # En la web, se recomienda usar el desbloqueo del propio teléfono del empleado
     id_emp = st.text_input("🆔 ID de Empleado")
     
+    st.info("Obteniendo ubicación GPS...")
     loc = get_geolocation()
+    
     if loc:
         lat, lon = loc['coords']['latitude'], loc['coords']['longitude']
-        # Lógica de cercanía (mantenida del anterior)...
-        st.success("GPS Activo")
-        # Aquí se activaría el botón de registro si está en rango
-    else:
-        st.warning("Se requiere GPS y validación biométrica del dispositivo.")
+        df_suc = obtener_datos("sucursales")
+        
+        tienda_cercana = None
+        if not df_suc.empty:
+            for _, suc in df_suc.iterrows():
+                dist = geodesic((lat, lon), (suc['latitud'], suc['longitud'])).meters
+                if dist <= 60:
+                    tienda_cercana = suc['nombre']
+                    break
 
+        if tienda_cercana:
+            st.success(f"📍 Ubicación confirmada: **{tienda_cercana}**")
+            if st.button("✅ REGISTRAR ASISTENCIA"):
+                if id_emp:
+                    datos_reg = {
+                        "fecha": str(datetime.date.today()),
+                        "hora": datetime.datetime.now().strftime("%H:%M:%S"),
+                        "empleado_id": id_emp,
+                        "tienda": tienda_cercana
+                    }
+                    if guardar_datos("registros", datos_reg):
+                        st.balloons()
+                        st.success("¡Registro guardado correctamente!")
+                else:
+                    st.warning("Escribe tu ID de empleado.")
+        else:
+            st.error("No estás en una sucursal autorizada.")
+    else:
+        st.warning("Activa el GPS para checar.")
+
+# --- MÓDULO DE ADMINISTRACIÓN ---
 elif menu == "🔐 ADMIN":
     password = st.sidebar.text_input("Clave Admin", type="password")
     if password == "3b_admin":
-        tab1, tab2 = st.tabs(["📊 Reportes", "👥 Gestión de Personal"])
+        tab1, tab2, tab3 = st.tabs(["📊 Reportes", "👥 Personal", "📍 Sucursales"])
         
+        # TAB 1: REPORTES
         with tab1:
-            st.subheader("Registros de Asistencia")
-            res_r = supabase.table("registros").select("*").execute()
-            st.dataframe(pd.DataFrame(res_r.data))
-            
+            st.subheader("Historial de Asistencias")
+            df_reg = obtener_datos("registros")
+            st.dataframe(df_reg, use_container_width=True)
+
+        # TAB 2: GESTIÓN DE PERSONAL
         with tab2:
-            st.subheader("Control de Usuarios")
-            
-            # Formulario para Crear/Editar
-            with st.expander("➕ Agregar / Editar Empleado"):
-                id_nuevo = st.text_input("ID del Empleado")
-                nombre_nuevo = st.text_input("Nombre Completo")
+            st.subheader("Control de Empleados")
+            with st.expander("➕ Agregar/Editar Empleado"):
+                id_e = st.text_input("ID")
+                nom_e = st.text_input("Nombre")
                 if st.button("Guardar Empleado"):
-                    guardar_empleado(id_nuevo, nombre_nuevo)
-                    st.success("Empleado actualizado")
+                    if guardar_datos("empleados", {"id": id_e, "nombre": nom_e}):
+                        st.rerun()
+            
+            df_e = obtener_datos("empleados")
+            for _, row in df_e.iterrows():
+                c1, c2, c3 = st.columns([2, 4, 1])
+                c1.write(row['id'])
+                c2.write(row['nombre'])
+                if c3.button("🗑️", key=f"del_e_{row['id']}"):
+                    eliminar_datos("empleados", "id", row['id'])
                     st.rerun()
 
-            # Tabla con opción de eliminar
-            df_emp = obtener_empleados()
-            if not df_emp.empty:
-                for index, row in df_emp.iterrows():
-                    col1, col2, col3 = st.columns([2, 4, 2])
-                    col1.write(f"**{row['id']}**")
-                    col2.write(row['nombre'])
-                    if col3.button("Eliminar", key=f"del_{row['id']}"):
-                        eliminar_empleado(row['id'])
-                        st.error(f"Eliminado: {row['id']}")
+        # TAB 3: GESTIÓN DE SUCURSALES (NUEVA OPCIÓN)
+        with tab3:
+            st.subheader("Configuración de Tiendas")
+            with st.expander("➕ Agregar Nueva Tienda"):
+                nom_t = st.text_input("Nombre de la Tienda")
+                lat_t = st.number_input("Latitud", format="%.6f")
+                lon_t = st.number_input("Longitud", format="%.6f")
+                st.caption("Tip: Abre Google Maps, deja presionado el lugar y copia los números.")
+                if st.button("Guardar Tienda"):
+                    if guardar_datos("sucursales", {"nombre": nom_t, "latitud": lat_t, "longitud": lon_t}):
                         st.rerun()
+            
+            df_t = obtener_datos("sucursales")
+            for _, row in df_t.iterrows():
+                c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+                c1.write(f"**{row['nombre']}**")
+                c2.write(row['latitud'])
+                c3.write(row['longitud'])
+                if c4.button("🗑️", key=f"del_t_{row['nombre']}"):
+                    eliminar_datos("sucursales", "nombre", row['nombre'])
+                    st.rerun()
