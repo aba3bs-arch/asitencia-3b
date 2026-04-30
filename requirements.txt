@@ -4,4 +4,4 @@ folium
 geopy
 pandas
 streamlit-js-eval
-st-gsheets-connection
+supabase
