@@ -19,10 +19,11 @@ from storage import (
     load_registros,
     save_registros,
     agregar_registro,
+    guardar_foto_referencia,
+    guardar_foto_checado,
 )
+from auth import hash_pin, pantalla_login_empleado
 from sheets import sheets_configurado, enviar_registro, enviar_registros
-from auth import hash_pin, pantalla_login_empleado, buscar_empleado
-from storage import guardar_foto_referencia, guardar_foto_checado
 
 
 def get_sucursales():
