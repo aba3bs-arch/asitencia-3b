@@ -29,6 +29,16 @@ def admin_password():
     except (KeyError, FileNotFoundError, AttributeError):
         return "3b_admin"
 
+
+def parse_coord(value):
+    """Convierte lat/lon a float (el componente GPS a veces devuelve strings)."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 st.set_page_config(page_title="Sistema Abarrotes 3B", layout="wide")
 
 # --- ESTILOS ---
@@ -60,9 +70,13 @@ if menu == "REGISTRO EMPLEADO":
     elif not isinstance(location, dict) or "latitude" not in location:
         st.error("No se pudo leer el GPS. Revisa los permisos de ubicación e intenta de nuevo.")
     else:
-        lat_gps = location["latitude"]
-        lon_gps = location["longitude"]
-        precision = location.get("accuracy")
+        lat_gps = parse_coord(location.get("latitude"))
+        lon_gps = parse_coord(location.get("longitude"))
+        precision = parse_coord(location.get("accuracy"))
+
+        if lat_gps is None or lon_gps is None:
+            st.error("Coordenadas inválidas. Vuelve a pulsar **Obtener ubicación**.")
+            st.stop()
 
         nombre_cercana, dist_cercana = sucursal_mas_cercana(lat_gps, lon_gps)
         tienda_detectada = nombre_cercana if dist_cercana <= RADIO_PERMITIDO_METROS else None
