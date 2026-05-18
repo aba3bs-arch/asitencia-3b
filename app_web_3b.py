@@ -1,3 +1,5 @@
+import hashlib
+import uuid
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
@@ -7,10 +9,20 @@ import pandas as pd
 import datetime
 
 from config import RADIO_PERMITIDO_METROS
-from storage import load_empleados, save_empleados, load_sucursales, save_sucursales
-
-if "registros" not in st.session_state:
-    st.session_state.registros = []
+from storage import (
+    load_empleados,
+    save_empleados,
+    load_sucursales,
+    save_sucursales,
+    load_administradores,
+    save_administradores,
+    load_registros,
+    save_registros,
+    agregar_registro,
+)
+from sheets import sheets_configurado, enviar_registro, enviar_registros
+from auth import hash_pin, pantalla_login_empleado, buscar_empleado
+from storage import guardar_foto_referencia, guardar_foto_checado
 
 
 def get_sucursales():
@@ -33,6 +45,148 @@ def refresh_empleados():
     st.session_state.empleados = load_empleados()
 
 
+def get_registros():
+    if "registros" not in st.session_state:
+        st.session_state.registros = load_registros()
+    return st.session_state.registros
+
+
+def refresh_registros():
+    st.session_state.registros = load_registros()
+
+
+def nombre_empleado(empleado_id):
+    for emp in get_empleados():
+        if emp["id"] == empleado_id:
+            return emp["nombre"]
+    return empleado_id
+
+
+def siguiente_tipo(empleado_id):
+    del_empleado = [r for r in get_registros() if r["empleado_id"] == empleado_id]
+    if not del_empleado:
+        return "entrada"
+    ultimo = max(del_empleado, key=lambda r: r["datetime"])
+    return "salida" if ultimo["tipo"] == "entrada" else "entrada"
+
+
+def registros_del_dia(fecha=None):
+    fecha = fecha or datetime.date.today().isoformat()
+    return [r for r in get_registros() if r["fecha"] == fecha]
+
+
+def registrar_checado(empleado_id, tienda, lat, lon, metodo_auth=None, foto_bytes=None):
+    ahora = datetime.datetime.now()
+    tipo = siguiente_tipo(empleado_id)
+    registro = {
+        "id": str(uuid.uuid4()),
+        "fecha": ahora.date().isoformat(),
+        "hora": ahora.strftime("%H:%M:%S"),
+        "datetime": ahora.isoformat(),
+        "empleado_id": empleado_id,
+        "empleado_nombre": nombre_empleado(empleado_id),
+        "tipo": tipo,
+        "tienda": tienda,
+        "lat": lat,
+        "lon": lon,
+        "metodo_auth": metodo_auth or "",
+        "sheets_synced": False,
+    }
+    if foto_bytes:
+        guardar_foto_checado(registro["id"], foto_bytes)
+        registro["tiene_foto"] = True
+    agregar_registro(registro)
+    refresh_registros()
+
+    if sheets_configurado():
+        ok, err = enviar_registro(registro)
+        if ok:
+            registros = load_registros()
+            for r in registros:
+                if r["id"] == registro["id"]:
+                    r["sheets_synced"] = True
+            save_registros(registros)
+            refresh_registros()
+            registro["sheets_synced"] = True
+        else:
+            registro["sheets_error"] = err
+
+    return registro
+
+
+def sincronizar_pendientes_sheets():
+    pendientes = [r for r in get_registros() if not r.get("sheets_synced")]
+    if not pendientes:
+        return 0, None
+    count, err = enviar_registros(pendientes)
+    if err:
+        return 0, err
+    registros = load_registros()
+    ids_ok = {p["id"] for p in pendientes[:count]}
+    for r in registros:
+        if r["id"] in ids_ok:
+            r["sheets_synced"] = True
+    save_registros(registros)
+    refresh_registros()
+    return count, None
+
+
+def get_administradores():
+    if "administradores" not in st.session_state:
+        st.session_state.administradores = load_administradores()
+    return st.session_state.administradores
+
+
+def refresh_administradores():
+    st.session_state.administradores = load_administradores()
+
+
+def hash_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def password_inicial():
+    try:
+        return st.secrets["ADMIN_PASSWORD"]
+    except (KeyError, FileNotFoundError, AttributeError):
+        return "3b_admin"
+
+
+def init_administradores():
+    admins = load_administradores()
+    if not admins:
+        admins = [{
+            "usuario": "admin",
+            "nombre": "Administrador principal",
+            "password_hash": hash_password(password_inicial()),
+            "activo": True,
+        }]
+        save_administradores(admins)
+        refresh_administradores()
+    return admins
+
+
+def admin_logueado():
+    return st.session_state.get("admin_usuario")
+
+
+def login_admin(usuario, password):
+    init_administradores()
+    usuario = usuario.strip().lower()
+    for adm in get_administradores():
+        if adm["usuario"] == usuario and adm.get("activo", True):
+            if hash_password(password) == adm["password_hash"]:
+                st.session_state.admin_usuario = adm["usuario"]
+                st.session_state.admin_nombre = adm["nombre"]
+                return True
+    return False
+
+
+def logout_admin():
+    st.session_state.pop("admin_usuario", None)
+    st.session_state.pop("admin_nombre", None)
+
+
 def sucursal_mas_cercana(lat, lon, sucursales):
     mejor = None
     for nombre, coords in sucursales.items():
@@ -40,13 +194,6 @@ def sucursal_mas_cercana(lat, lon, sucursales):
         if mejor is None or dist < mejor[1]:
             mejor = (nombre, dist)
     return mejor
-
-
-def admin_password():
-    try:
-        return st.secrets["ADMIN_PASSWORD"]
-    except (KeyError, FileNotFoundError, AttributeError):
-        return "3b_admin"
 
 
 def parse_coord(value):
@@ -106,19 +253,25 @@ if menu == "REGISTRO EMPLEADO":
     st.image("https://logodownload.org/wp-content/uploads/2019/07/3b-logo.png", width=150)
     st.title("Control de Asistencia")
 
+    if "empleado_autenticado" not in st.session_state:
+        st.session_state.empleado_autenticado = None
+
+    id_autenticado = pantalla_login_empleado(get_empleados)
+    if not id_autenticado:
+        st.stop()
+
+    id_str = id_autenticado
+    st.success(f"Hola, **{nombre_empleado(id_str)}**")
+    if st.button("Cerrar sesión", key="logout_emp"):
+        for key in ("empleado_autenticado", "metodo_auth_usado", "foto_login_bytes"):
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    st.divider()
     sucursales = get_sucursales()
     if not sucursales:
         st.error("No hay sucursales configuradas. Contacta al administrador.")
         st.stop()
-
-    empleados = get_empleados()
-    if empleados:
-        opciones = {e["id"]: f"{e['id']} — {e['nombre']}" for e in empleados if e.get("activo", True)}
-        id_emp = st.selectbox("Selecciona tu ID de empleado", options=list(opciones.keys()),
-                              format_func=lambda x: opciones[x])
-    else:
-        st.warning("Aún no hay empleados registrados.")
-        id_emp = st.text_input("Ingresa tu ID de Empleado")
 
     st.info("Pulsa **Obtener ubicación** y acepta el permiso de GPS en tu navegador o celular.")
     location = streamlit_geolocation()
@@ -147,22 +300,25 @@ if menu == "REGISTRO EMPLEADO":
 
         if tienda_detectada:
             st.success(f"📍 Dentro de rango — Sucursal **{tienda_detectada}** ({dist_cercana:.0f} m)")
-            if st.button("REGISTRAR ENTRADA/SALIDA", disabled=not str(id_emp).strip()):
-                id_str = str(id_emp).strip()
-                ok, msg = empleado_valido(id_str)
-                if not ok:
-                    st.error(msg)
-                else:
-                    hora = datetime.datetime.now().strftime("%H:%M:%S")
-                    st.session_state.registros.append({
-                        "empleado": id_str,
-                        "tienda": tienda_detectada,
-                        "hora": hora,
-                        "lat": lat_gps,
-                        "lon": lon_gps,
-                    })
-                    st.balloons()
-                    st.success(f"Registro exitoso a las {hora}")
+            tipo_siguiente = siguiente_tipo(id_str)
+            st.info(f"Próximo registro: **{tipo_siguiente.upper()}**")
+            if st.button(f"REGISTRAR {tipo_siguiente.upper()}"):
+                foto_bytes = st.session_state.pop("foto_login_bytes", None)
+                reg = registrar_checado(
+                    id_str,
+                    tienda_detectada,
+                    lat_gps,
+                    lon_gps,
+                    metodo_auth=st.session_state.get("metodo_auth_usado"),
+                    foto_bytes=foto_bytes,
+                )
+                st.balloons()
+                msg = f"**{reg['tipo'].upper()}** registrada a las {reg['hora']} — {reg['tienda']}"
+                if reg.get("sheets_synced"):
+                    msg += " (guardado en Google Sheets)"
+                elif reg.get("sheets_error"):
+                    msg += f" — Sheets pendiente: {reg['sheets_error']}"
+                st.success(msg)
         else:
             st.error(
                 f"❌ FUERA DE RANGO. Estás a **{dist_cercana:.0f} m** de {nombre_cercana} "
@@ -173,12 +329,32 @@ if menu == "REGISTRO EMPLEADO":
 # PANEL ADMINISTRADOR
 # ---------------------------------------------------------
 elif menu == "PANEL ADMINISTRADOR":
-    password = st.sidebar.text_input("Contraseña Admin", type="password")
-    if not password or password != admin_password():
-        st.warning("Ingresa la contraseña para acceder al panel.")
+    init_administradores()
+
+    st.sidebar.subheader("Acceso administrador")
+    if not admin_logueado():
+        usuario_login = st.sidebar.text_input("Usuario")
+        clave_login = st.sidebar.text_input("Contraseña", type="password")
+        if st.sidebar.button("Iniciar sesión", type="primary"):
+            if login_admin(usuario_login, clave_login):
+                st.rerun()
+            else:
+                st.sidebar.error("Usuario o contraseña incorrectos.")
+        st.warning("Inicia sesión con tu usuario de administrador.")
+        st.caption(
+            "Primer acceso: usuario **admin** y la contraseña definida en Secrets "
+            "(o `3b_admin` en local)."
+        )
         st.stop()
 
-    tab_mon, tab_emp, tab_suc = st.tabs(["Monitoreo", "Empleados", "Sucursales"])
+    st.sidebar.success(f"Sesión: **{st.session_state.admin_nombre}**")
+    if st.sidebar.button("Cerrar sesión"):
+        logout_admin()
+        st.rerun()
+
+    tab_mon, tab_rep, tab_emp, tab_suc, tab_adm = st.tabs(
+        ["Monitoreo", "Reporte diario", "Empleados", "Sucursales", "Administradores"]
+    )
 
     # --- Monitoreo ---
     with tab_mon:
@@ -197,48 +373,124 @@ elif menu == "PANEL ADMINISTRADOR":
             ).add_to(m)
             folium.Marker([coords["lat"], coords["lon"]], popup=nombre).add_to(m)
 
-        for reg in st.session_state.registros:
+        hoy_mapa = registros_del_dia()
+        for reg in hoy_mapa:
             folium.Marker(
                 location=[reg["lat"], reg["lon"]],
                 icon=folium.DivIcon(html='<div class="pulse"></div>'),
-                popup=f"{reg['empleado']} — {reg['tienda']} ({reg['hora']})",
+                popup=(
+                    f"{reg['empleado_nombre']} — {reg['tipo'].upper()} "
+                    f"@ {reg['tienda']} ({reg['hora']})"
+                ),
             ).add_to(m)
 
         st_folium(m, width="100%", height=500)
+        st.caption(f"Marcadores del día: {len(hoy_mapa)} registro(s).")
 
-        st.subheader("Historial de hoy")
-        if st.session_state.registros:
-            df = pd.DataFrame(st.session_state.registros)[["empleado", "tienda", "hora"]]
-            df.columns = ["Empleado", "Tienda", "Hora"]
-            st.table(df)
+    with tab_rep:
+        hoy = datetime.date.today()
+        st.subheader(f"Reporte del {hoy.strftime('%d/%m/%Y')}")
+        registros_hoy = registros_del_dia(hoy.isoformat())
+
+        if not registros_hoy:
+            st.info("No hay entradas ni salidas registradas hoy.")
         else:
-            st.caption("Sin registros en esta sesión.")
+            entradas = sum(1 for r in registros_hoy if r["tipo"] == "entrada")
+            salidas = sum(1 for r in registros_hoy if r["tipo"] == "salida")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total registros", len(registros_hoy))
+            c2.metric("Entradas", entradas)
+            c3.metric("Salidas", salidas)
+
+            df = pd.DataFrame(registros_hoy).sort_values("datetime", ascending=False)
+            df_show = df[["hora", "empleado_id", "empleado_nombre", "tipo", "tienda"]].copy()
+            df_show.columns = ["Hora", "ID", "Nombre", "Tipo", "Sucursal"]
+            df_show["Tipo"] = df_show["Tipo"].str.upper()
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+            csv = df_show.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "Descargar CSV del día",
+                csv,
+                file_name=f"asistencia_{hoy.isoformat()}.csv",
+                mime="text/csv",
+            )
+
+        st.divider()
+        st.subheader("Google Sheets")
+        if sheets_configurado():
+            pendientes = [r for r in get_registros() if not r.get("sheets_synced")]
+            st.caption(f"Registros pendientes de sincronizar: **{len(pendientes)}**")
+            if st.button("Sincronizar pendientes con Google Sheets", type="primary"):
+                count, err = sincronizar_pendientes_sheets()
+                if err:
+                    st.error(f"Error al sincronizar: {err}")
+                elif count == 0:
+                    st.info("No hay registros pendientes.")
+                else:
+                    st.success(f"Se enviaron **{count}** registro(s) a Google Sheets.")
+                    st.rerun()
+        else:
+            st.warning(
+                "Google Sheets no configurado. Agrega `gcp_service_account` y "
+                "`GOOGLE_SHEET_ID` en Secrets (ver `.streamlit/secrets.toml.example`)."
+            )
 
     # --- Empleados ---
     with tab_emp:
         st.subheader("Registrar empleado")
-        with st.form("form_empleado", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                nuevo_id = st.text_input("ID de empleado", placeholder="Ej: 001")
-            with col2:
-                nuevo_nombre = st.text_input("Nombre completo", placeholder="Ej: Juan Pérez")
-            guardar_emp = st.form_submit_button("Guardar empleado", type="primary")
+        col1, col2 = st.columns(2)
+        with col1:
+            nuevo_id = st.text_input("ID de empleado", placeholder="Ej: 001", key="new_emp_id")
+        with col2:
+            nuevo_nombre = st.text_input("Nombre completo", placeholder="Ej: Juan Pérez", key="new_emp_nom")
 
-        if guardar_emp:
+        metodo_auth = st.selectbox(
+            "Método de acceso",
+            ["pin", "foto", "huella"],
+            format_func=lambda x: {"pin": "PIN", "foto": "Foto", "huella": "Huella / Face ID"}[x],
+            key="new_emp_metodo",
+        )
+
+        nuevo_pin = ""
+        foto_referencia = None
+        if metodo_auth == "pin":
+            nuevo_pin = st.text_input("PIN (4-8 dígitos)", type="password", max_chars=8, key="new_emp_pin")
+        elif metodo_auth == "foto":
+            foto_referencia = st.camera_input("Foto de referencia del empleado", key="new_emp_foto")
+        else:
+            st.caption("El empleado registrará su huella en el primer acceso desde su celular.")
+
+        if st.button("Guardar empleado", type="primary", key="btn_save_emp"):
             nuevo_id = nuevo_id.strip()
             nuevo_nombre = nuevo_nombre.strip()
             if not nuevo_id or not nuevo_nombre:
                 st.error("ID y nombre son obligatorios.")
+            elif metodo_auth == "pin" and (not nuevo_pin or len(nuevo_pin) < 4):
+                st.error("El PIN debe tener entre 4 y 8 dígitos.")
+            elif metodo_auth == "foto" and foto_referencia is None:
+                st.error("Toma la foto de referencia del empleado.")
             else:
                 empleados = get_empleados()
                 if any(e["id"] == nuevo_id for e in empleados):
                     st.error(f"Ya existe un empleado con ID **{nuevo_id}**.")
                 else:
-                    empleados.append({"id": nuevo_id, "nombre": nuevo_nombre, "activo": True})
+                    emp_nuevo = {
+                        "id": nuevo_id,
+                        "nombre": nuevo_nombre,
+                        "activo": True,
+                        "metodo_auth": metodo_auth,
+                    }
+                    if metodo_auth == "pin":
+                        emp_nuevo["pin_hash"] = hash_pin(nuevo_pin)
+                    if metodo_auth == "huella":
+                        emp_nuevo["huella_registrada"] = False
+                    empleados.append(emp_nuevo)
                     save_empleados(empleados)
+                    if metodo_auth == "foto" and foto_referencia:
+                        guardar_foto_referencia(nuevo_id, foto_referencia.getvalue())
                     refresh_empleados()
-                    st.success(f"Empleado **{nuevo_nombre}** registrado.")
+                    st.success(f"Empleado **{nuevo_nombre}** registrado ({metodo_auth.upper()}).")
                     st.rerun()
 
         st.divider()
@@ -250,8 +502,9 @@ elif menu == "PANEL ADMINISTRADOR":
             for emp in empleados:
                 c1, c2, c3 = st.columns([2, 3, 1])
                 estado = "Activo" if emp.get("activo", True) else "Inactivo"
+                metodo = emp.get("metodo_auth", "pin").upper()
                 c1.write(f"**{emp['id']}**")
-                c2.write(f"{emp['nombre']} — _{estado}_")
+                c2.write(f"{emp['nombre']} — _{estado}_ — {metodo}")
                 if c3.button("Eliminar", key=f"del_emp_{emp['id']}"):
                     empleados = [e for e in empleados if e["id"] != emp["id"]]
                     save_empleados(empleados)
@@ -303,3 +556,64 @@ elif menu == "PANEL ADMINISTRADOR":
                     save_sucursales(sucursales)
                     refresh_sucursales()
                     st.rerun()
+
+    # --- Administradores ---
+    with tab_adm:
+        st.subheader("Registrar administrador")
+        with st.form("form_admin", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                nuevo_usuario = st.text_input("Usuario", placeholder="Ej: maria.garcia")
+            with c2:
+                nuevo_nombre_adm = st.text_input("Nombre completo", placeholder="Ej: María García")
+            c3, c4 = st.columns(2)
+            with c3:
+                nueva_clave = st.text_input("Contraseña", type="password")
+            with c4:
+                confirmar_clave = st.text_input("Confirmar contraseña", type="password")
+            guardar_adm = st.form_submit_button("Guardar administrador", type="primary")
+
+        if guardar_adm:
+            nuevo_usuario = nuevo_usuario.strip().lower()
+            nuevo_nombre_adm = nuevo_nombre_adm.strip()
+            if not nuevo_usuario or not nuevo_nombre_adm:
+                st.error("Usuario y nombre son obligatorios.")
+            elif len(nueva_clave) < 6:
+                st.error("La contraseña debe tener al menos 6 caracteres.")
+            elif nueva_clave != confirmar_clave:
+                st.error("Las contraseñas no coinciden.")
+            else:
+                admins = get_administradores()
+                if any(a["usuario"] == nuevo_usuario for a in admins):
+                    st.error(f"Ya existe el usuario **{nuevo_usuario}**.")
+                else:
+                    admins.append({
+                        "usuario": nuevo_usuario,
+                        "nombre": nuevo_nombre_adm,
+                        "password_hash": hash_password(nueva_clave),
+                        "activo": True,
+                    })
+                    save_administradores(admins)
+                    refresh_administradores()
+                    st.success(f"Administrador **{nuevo_nombre_adm}** registrado.")
+                    st.rerun()
+
+        st.divider()
+        st.subheader("Administradores del sistema")
+        admins = get_administradores()
+        for adm in admins:
+            c1, c2, c3 = st.columns([2, 3, 1])
+            estado = "Activo" if adm.get("activo", True) else "Inactivo"
+            c1.write(f"**{adm['usuario']}**")
+            c2.write(f"{adm['nombre']} — _{estado}_")
+            es_yo = adm["usuario"] == admin_logueado()
+            if c3.button("Eliminar", key=f"del_adm_{adm['usuario']}", disabled=es_yo):
+                if len(admins) <= 1:
+                    st.error("Debe existir al menos un administrador.")
+                else:
+                    admins = [a for a in admins if a["usuario"] != adm["usuario"]]
+                    save_administradores(admins)
+                    refresh_administradores()
+                    st.rerun()
+            if es_yo:
+                c3.caption("Tú")
