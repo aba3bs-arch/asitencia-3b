@@ -1,7 +1,6 @@
-streamlit
-streamlit-folium
-folium
-geopy
-pandas
-streamlit-js-eval
-supabase
+streamlit>=1.32.0
+streamlit-folium>=0.18.0
+streamlit-geolocation>=0.0.10
+folium>=0.15.0
+geopy>=2.4.0
+pandas>=2.0.0

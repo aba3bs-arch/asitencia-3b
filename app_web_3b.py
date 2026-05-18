@@ -1,171 +1,130 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+from streamlit_geolocation import streamlit_geolocation
 from geopy.distance import geodesic
 import pandas as pd
 import datetime
-from streamlit_js_eval import get_geolocation
-from supabase import create_client
 
-# 1. CONFIGURACIÓN
-st.set_page_config(page_title="Abarrotes Las 3B", layout="wide")
+from config import SUCURSALES, RADIO_PERMITIDO_METROS
 
-# Conexión segura
-url = st.secrets["SUPABASE_URL"]
-key = st.secrets["SUPABASE_KEY"]
-supabase = create_client(url, key)
+if "registros" not in st.session_state:
+    st.session_state.registros = []
 
-# --- FUNCIONES DE BASE DE DATOS ---
-def obtener_datos(tabla):
+
+def sucursal_mas_cercana(lat, lon):
+    """Devuelve (nombre, distancia_metros) de la sucursal más cercana."""
+    mejor = None
+    for nombre, coords in SUCURSALES.items():
+        dist = geodesic((lat, lon), (coords["lat"], coords["lon"])).meters
+        if mejor is None or dist < mejor[1]:
+            mejor = (nombre, dist)
+    return mejor
+
+
+def admin_password():
+    """Contraseña desde secrets (nube) o valor local por defecto."""
     try:
-        res = supabase.table(tabla).select("*").execute()
-        return pd.DataFrame(res.data)
-    except Exception:
-        return pd.DataFrame()
+        return st.secrets["ADMIN_PASSWORD"]
+    except (KeyError, FileNotFoundError, AttributeError):
+        return "3b_admin"
 
-def guardar_datos(tabla, datos):
-    try:
-        supabase.table(tabla).upsert(datos).execute()
-        return True
-    except Exception as e:
-        st.error(f"Error al guardar: {e}")
-        return False
+st.set_page_config(page_title="Sistema Abarrotes 3B", layout="wide")
 
-def eliminar_datos(tabla, columna_id, valor_id):
-    try:
-        supabase.table(tabla).delete().eq(columna_id, valor_id).execute()
-        return True
-    except Exception as e:
-        st.error(f"Error al eliminar: {e}")
-        return False
+# --- ESTILOS ---
+st.markdown("""
+    <style>
+    .stButton>button { width: 100%; height: 60px; font-weight: bold; font-size: 20px; }
+    .pulse { height: 15px; width: 15px; background-color: #2ECC71; border-radius: 50%; display: inline-block; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.7); } 70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(46, 204, 113, 0); } 100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(46, 204, 113, 0); } }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- INTERFAZ LATERAL ---
-with st.sidebar:
-    try:
-        # Referencia exacta al archivo solicitado
-        st.image("logo_3b_2.png", use_container_width=True)
-    except:
-        st.info("Sube 'logo_3b_2.png' para verlo aquí")
-    
-    st.title("Abarrotes Las 3B")
-    opcion_principal = st.radio("IR A:", ["📱 REGISTRO", "🔐 ADMIN"])
-    st.markdown("---")
-    
-    password_correcta = False
-    admin_seccion = "📊 Reportes"
-    
-    if opcion_principal == "🔐 ADMIN":
-        pwd = st.text_input("Clave de Acceso", type="password")
-        if pwd == "3b_admin":
-            password_correcta = True
-            st.success("Acceso Autorizado")
-            admin_seccion = st.radio("CONTROL:", ["📊 Reportes", "👥 Personal", "📍 Sucursales"])
-        elif pwd:
-            st.error("Clave incorrecta")
+# --- NAVEGACIÓN ---
+menu = st.sidebar.radio("MENÚ", ["REGISTRO EMPLEADO", "PANEL ADMINISTRADOR"])
 
-# --- LADO DERECHO (CONTENIDO PRINCIPAL) ---
+# ---------------------------------------------------------
+# SECCIÓN 1: PORTAL DEL EMPLEADO
+# ---------------------------------------------------------
+if menu == "REGISTRO EMPLEADO":
+    st.image("https://logodownload.org/wp-content/uploads/2019/07/3b-logo.png", width=150)
+    st.title("Control de Asistencia")
 
-if opcion_principal == "📱 REGISTRO":
-    st.header("📸 Registro con Verificación")
-    col_cam, col_map = st.columns([1, 1])
-    
-    with col_cam:
-        id_emp = st.text_input("🆔 ID de Empleado")
-        foto = st.camera_input("Toma una foto para verificar tu identidad")
-    
-    with col_map:
-        loc = get_geolocation()
-        if loc:
-            lat, lon = loc['coords']['latitude'], loc['coords']['longitude']
-            df_suc = obtener_datos("sucursales")
-            
-            m = folium.Map(location=[lat, lon], zoom_start=15)
-            folium.Marker([lat, lon], tooltip="Tú", icon=folium.Icon(color="blue")).add_to(m)
-            
-            tienda_cercana = None
-            if not df_suc.empty:
-                for _, suc in df_suc.iterrows():
-                    dist = geodesic((lat, lon), (suc['latitud'], suc['longitud'])).meters
-                    folium.Marker([suc['latitud'], suc['longitud']], popup=suc['nombre'], icon=folium.Icon(color="red")).add_to(m)
-                    if dist <= 120: 
-                        tienda_cercana = suc['nombre']
-            
-            st_folium(m, width="100%", height=300)
+    id_emp = st.text_input("Ingresa tu ID de Empleado")
 
-            if tienda_cercana and foto and id_emp:
-                st.success(f"📍 Estás en: **{tienda_cercana}**")
-                if st.button("✅ FINALIZAR REGISTRO"):
-                    datos = {
-                        "empleado_id": id_emp,
-                        "tienda": tienda_cercana,
-                        "fecha": str(datetime.date.today()),
-                        "hora": datetime.datetime.now().strftime("%H:%M:%S")
-                    }
-                    if guardar_datos("registros", datos):
-                        st.balloons()
-                        st.success("¡Registro completado!")
-            elif not foto:
-                st.info("Toma la foto para habilitar el registro.")
-            elif not tienda_cercana:
-                st.error("No estás cerca de una sucursal.")
+    st.info("Pulsa **Obtener ubicación** y acepta el permiso de GPS en tu navegador o celular.")
+    location = streamlit_geolocation()
+
+    if not location or location == "No Location Info":
+        st.warning("Aún no hay ubicación. Usa el botón de arriba para activar el GPS.")
+    elif not isinstance(location, dict) or "latitude" not in location:
+        st.error("No se pudo leer el GPS. Revisa los permisos de ubicación e intenta de nuevo.")
+    else:
+        lat_gps = location["latitude"]
+        lon_gps = location["longitude"]
+        precision = location.get("accuracy")
+
+        nombre_cercana, dist_cercana = sucursal_mas_cercana(lat_gps, lon_gps)
+        tienda_detectada = nombre_cercana if dist_cercana <= RADIO_PERMITIDO_METROS else None
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption(f"Coordenadas: {lat_gps:.6f}, {lon_gps:.6f}")
+        with col2:
+            if precision is not None:
+                st.caption(f"Precisión GPS: ±{precision:.0f} m")
+
+        if tienda_detectada:
+            st.success(f"📍 Dentro de rango — Sucursal **{tienda_detectada}** ({dist_cercana:.0f} m)")
+            if st.button("REGISTRAR ENTRADA/SALIDA", disabled=not id_emp.strip()):
+                if not id_emp.strip():
+                    st.error("Ingresa tu ID de empleado.")
+                else:
+                    hora = datetime.datetime.now().strftime("%H:%M:%S")
+                    st.session_state.registros.append({
+                        "empleado": id_emp.strip(),
+                        "tienda": tienda_detectada,
+                        "hora": hora,
+                        "lat": lat_gps,
+                        "lon": lon_gps,
+                    })
+                    st.balloons()
+                    st.success(f"Registro exitoso a las {hora}")
         else:
-            st.warning("Buscando GPS...")
+            st.error(
+                f"❌ FUERA DE RANGO. Estás a **{dist_cercana:.0f} m** de {nombre_cercana} "
+                f"(máximo permitido: {RADIO_PERMITIDO_METROS} m)."
+            )
 
-elif opcion_principal == "🔐 ADMIN" and password_correcta:
-    
-    if admin_seccion == "📊 Reportes":
-        st.header("Historial de Asistencias")
-        df_reg = obtener_datos("registros")
-        if not df_reg.empty:
-            # Ordenar solo si la columna existe
-            if 'fecha' in df_reg.columns:
-                df_reg = df_reg.sort_values(by="fecha", ascending=False)
-            st.dataframe(df_reg, use_container_width=True)
+# ---------------------------------------------------------
+# SECCIÓN 2: PANEL ADMINISTRADOR
+# ---------------------------------------------------------
+elif menu == "PANEL ADMINISTRADOR":
+    password = st.sidebar.text_input("Contraseña Admin", type="password")
+    if password and password == admin_password():
+        st.title("📍 Monitoreo Real Abarrotes 3B")
+        
+        # Mapa
+        m = folium.Map(location=[31.3050, -110.9300], zoom_start=13)
+        for nombre, coords in SUCURSALES.items():
+            folium.Circle([coords['lat'], coords['lon']], radius=20, color="red", fill=True).add_to(m)
+            folium.Marker([coords['lat'], coords['lon']], popup=nombre).add_to(m)
+        
+        for reg in st.session_state.registros:
+            folium.Marker(
+                location=[reg["lat"], reg["lon"]],
+                icon=folium.DivIcon(html='<div class="pulse"></div>'),
+                popup=f"{reg['empleado']} — {reg['tienda']} ({reg['hora']})",
+            ).add_to(m)
+        
+        st_folium(m, width="100%", height=500)
+        
+        st.subheader("Historial de Hoy")
+        if st.session_state.registros:
+            df = pd.DataFrame(st.session_state.registros)[["empleado", "tienda", "hora"]]
+            df.columns = ["Empleado", "Tienda", "Hora"]
+            st.table(df)
         else:
-            st.info("Aún no hay registros de asistencia.")
-
-    elif admin_seccion == "👥 Personal":
-        col_form, col_lista = st.columns([1, 2])
-        with col_form:
-            st.subheader("➕ Nuevo Empleado")
-            id_e = st.text_input("ID")
-            nom_e = st.text_input("Nombre")
-            if st.button("Guardar"):
-                if id_e and nom_e:
-                    if guardar_datos("empleados", {"id": id_e, "nombre": nom_e}): st.rerun()
-        
-        with col_lista:
-            st.subheader("👥 Personal Registrado")
-            df_e = obtener_datos("empleados")
-            if not df_e.empty:
-                for _, row in df_e.iterrows():
-                    c1, c2, c3 = st.columns([1, 3, 1])
-                    c1.write(f"`{row.get('id', 'N/A')}`")
-                    c2.write(row.get('nombre', 'Sin Nombre'))
-                    if c3.button("🗑️", key=f"del_emp_{row.get('id')}"):
-                        eliminar_datos("empleados", "id", row['id'])
-                        st.rerun()
-            else:
-                st.write("No hay empleados en la base de datos.")
-
-    elif admin_seccion == "📍 Sucursales":
-        col_f, col_m = st.columns([1, 2])
-        with col_f:
-            st.subheader("➕ Nueva Tienda")
-            n_t = st.text_input("Nombre Tienda")
-            la_t = st.number_input("Lat", format="%.6f")
-            lo_t = st.number_input("Lon", format="%.6f")
-            if st.button("Agregar Sucursal"):
-                if n_t:
-                    if guardar_datos("sucursales", {"nombre": n_t, "latitud": la_t, "longitud": lo_t}): st.rerun()
-        
-        with col_m:
-            st.subheader("📍 Mapa de Sucursales")
-            df_s = obtener_datos("sucursales")
-            if not df_s.empty:
-                m_adm = folium.Map(location=[31.30, -110.93], zoom_start=13)
-                for _, s in df_s.iterrows():
-                    folium.Marker([s['latitud'], s['longitud']], popup=s['nombre']).add_to(m_adm)
-                st_folium(m_adm, width="100%", height=350)
-            else:
-                st.info("No hay sucursales registradas.")
+            st.caption("Sin registros aún. Los checados del portal empleado aparecerán aquí.")
+    else:
+        st.warning("Ingresa la contraseña para ver el mapa.")
