@@ -2,6 +2,29 @@
   {
     "id": "1504",
     "nombre": "Andres",
-    "activo": true
+    "activo": true,
+    "metodo_auth": "pin",
+    "pin_hash": "3ec13115817a014a621e22b052993c86ed03ed69114f8413888f302d70e2d216"
+  },
+  {
+    "id": "0005",
+    "nombre": "Misael",
+    "activo": true,
+    "metodo_auth": "pin",
+    "pin_hash": "1ed8eb363bcd64c52f5f8703ecd464008979ac2ef462e6c5df342fe56c561bd5"
+  },
+  {
+    "id": "0006",
+    "nombre": "Jose Luis",
+    "activo": true,
+    "metodo_auth": "pin",
+    "pin_hash": "6b3b9a6ddb739ea6b3984e9038c33edeaecfb0eea476eba17b606d4699ca24e1"
+  },
+  {
+    "id": "0007",
+    "nombre": "Gonzalo",
+    "activo": true,
+    "metodo_auth": "pin",
+    "pin_hash": "f15cea39f11dc0371cfb9a4b7b1c38d5c636feb72d70e2759b0e505905ee9d01"
   }
 ]
